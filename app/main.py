@@ -165,6 +165,11 @@ async def process_issues(now: datetime) -> None:
                 continue
 
             logger.info(f"[issue {issue_id}] fetched {len(messages)} messages")
+
+            if len(messages) > 2:
+                logger.info(f"[issue {issue_id}] more than 2 messages, skipping")
+                continue
+
             # logger.info(f"[issue {issue_id}] messages: {messages}")
 
             # Sort by creation time ascending

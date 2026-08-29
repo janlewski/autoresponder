@@ -1,2 +1,29 @@
+[project]
+name = "autoresponder"
+version = "0.1.0"
+description = "Allegro autoresponder"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["python-dotenv>=1.1.1", "fastapi>=0.141.1", "httpx>=0.28.1", "uvicorn[standard]>=0.35.0"]
+
+[dependency-groups]
+dev = ["pyright>=1.1.411", "ruff>=0.16.5"]
+
 [tool.ruff]
-lint.select = ["E", "F", "I", "B", "ANN"]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "ANN"]
+ignore = ["E501"]
+
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.pyright]
+venvPath = "./.venv"
+typeCheckingMode = "standard"
+reportPrivateImportUsage = false
+exclude = ["**/__pycache__", ".*", "**/.ipynb_checkpoints**"]
+include = ["."]
+pythonPlatform = "All"
+pythonVersion = "3.13"

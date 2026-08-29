@@ -70,16 +70,14 @@ async def process_threads(now: datetime, config: Settings) -> None:
         fetched_messages.append({"thread": thread, "messages": messages})
         if not messages:
             continue
-        last = max(messages, key=lambda m: m.get("createdAt", ""))
-        if not last.get("author", {}).get("isInterlocutor") or last.get("type") != "ASK_QUESTION":
-            continue
-        if config.reply_only_first_message and any(
-            message is not last and message.get("author", {}).get("isInterlocutor")
-            for message in messages
+        first = min(messages, key=lambda message: message.get("createdAt", ""))
+        if (
+            not first.get("author", {}).get("isInterlocutor")
+            or first.get("type") != "ASK_QUESTION"
         ):
             continue
-        message_id = last.get("id") or last.get("createdAt")
-        created = datetime.fromisoformat(last.get("createdAt", now.isoformat()).replace("Z", "+00:00"))
+        message_id = first.get("id") or first.get("createdAt")
+        created = datetime.fromisoformat(first.get("createdAt", now.isoformat()).replace("Z", "+00:00"))
         decision = decide_autoreply(now=now, msg_time=created, settings=config)
         key = f"thread:{thread_id}:{message_id}"
         if (
@@ -110,17 +108,12 @@ async def process_issues(now: datetime, config: Settings) -> None:
         fetched_issues.append({"issue": issue, "messages": messages})
         if not messages:
             continue
-        # Allegro returns issue chat newest-first; choose explicitly to be resilient.
-        last = max(messages, key=lambda m: m.get("createdAt", ""))
-        if last.get("author", {}).get("role") != "BUYER":
+        # Allegro returns issue chat newest-first; select the first message explicitly.
+        first = min(messages, key=lambda message: message.get("createdAt", ""))
+        if first.get("author", {}).get("role") != "BUYER":
             continue
-        if config.reply_only_first_message and any(
-            message is not last and message.get("author", {}).get("role") == "BUYER"
-            for message in messages
-        ):
-            continue
-        message_id = last.get("id") or last.get("createdAt")
-        created = datetime.fromisoformat(last.get("createdAt", now.isoformat()).replace("Z", "+00:00"))
+        message_id = first.get("id") or first.get("createdAt")
+        created = datetime.fromisoformat(first.get("createdAt", now.isoformat()).replace("Z", "+00:00"))
         decision = decide_autoreply(now=now, msg_time=created, settings=config, is_issue=True)
         key = f"issue:{issue_id}:{message_id}"
         if (

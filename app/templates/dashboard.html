@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Allegro Autoresponder</title>
+  <style>
+    body{max-width:900px;margin:40px auto;padding:0 16px;font:16px system-ui;color:#191919}
+    textarea,input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 16px}
+    input[type="checkbox"]{width:auto;margin:0;padding:0;vertical-align:middle}
+    textarea{min-height:105px}button{padding:10px 14px;background:#111;color:#fff;border:0;border-radius:5px}
+    section{border-top:1px solid #ddd;margin-top:28px;padding-top:20px}.row{display:flex;gap:18px}.row>*{flex:1}
+    .options{display:flex;flex-direction:column;align-items:flex-start;gap:10px;margin:0 0 16px}
+    .options label{display:flex;align-items:center;gap:8px}
+    pre{max-height:440px;overflow:auto;padding:12px;background:#f5f5f5;border-radius:5px;white-space:pre-wrap;word-break:break-word}
+    .warning{padding:12px;background:#fff3cd;border-radius:5px}
+  </style>
+</head>
+<body>
+  <h1>Allegro Autoresponder</h1>
+  <p id="status">Loading…</p>
+  <section>
+    <h2>Connect Allegro</h2>
+    <p>Device flow works through an SSH tunnel and needs no public callback URL.</p>
+    <button onclick="connect()">Get Allegro login link</button> <button onclick="complete()">I approved it</button>
+    <p id="oauth"></p>
+  </section>
+  <section>
+    <h2>Replies</h2>
+    <label>Question reply<textarea id="autoresponse_message"></textarea></label>
+    <label>Issue/discussion reply<textarea id="autoresponse_issue"></textarea></label>
+    <label>New-order reply<textarea id="autoresponse_order"></textarea></label>
+    <div class="options">
+      <label><input type="checkbox" id="process_issues"> Respond to issues/discussions</label>
+      <label><input type="checkbox" id="process_orders"> Send a message for each new purchase</label>
+      <label><input type="checkbox" id="debug_read_only"> Enable read-only debug mode (never sends replies or updates the order cursor)</label>
+    </div>
+    <div class="row"><label>Poll seconds<input id="poll_interval_seconds" type="number"></label></div>
+    <button onclick="save()">Save configuration</button>
+  </section>
+  <section id="debug" hidden>
+    <h2>Read-only debug data</h2>
+    <p class="warning">Automatic replies are disabled. This shows only data fetched during the current running process; refresh after the next poll to see newer data.</p>
+    <p id="debug-status">Loading…</p>
+    <h3>Messages</h3><pre id="debug-messages"></pre>
+    <h3>Issues and discussions</h3><pre id="debug-issues"></pre>
+    <h3>Purchases</h3><pre id="debug-purchases"></pre>
+  </section>
+  <script>
+    let headers={};
+    let token=prompt('Admin token (leave empty if APP_ADMIN_TOKEN is not set)');
+    if(token)headers.Authorization='Bearer '+token;
+    async function api(u,o={}){o.headers={...headers,...(o.headers||{})};let r=await fetch(u,o);if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json()}
+    function setValue(id,value){let e=document.getElementById(id);if(e)e.type==='checkbox'?e.checked=value:e.value=value}
+    async function loadDebug(){let data=await api('/api/debug/recent');document.getElementById('debug').hidden=false;document.getElementById('debug-status').textContent=data.fetched_at?'Last completed poll: '+data.fetched_at:'Waiting for the first completed poll.';document.getElementById('debug-messages').textContent=JSON.stringify(data.messages,null,2);document.getElementById('debug-issues').textContent=JSON.stringify(data.issues,null,2);document.getElementById('debug-purchases').textContent=JSON.stringify(data.purchases,null,2)}
+    async function load(){let s=await api('/api/settings');for(let k in s)setValue(k,s[k]);let h=await fetch('/health').then(x=>x.json());status.textContent=h.connected?'Connected and polling.':'Not connected yet.';if(s.debug_read_only)await loadDebug()}
+    async function save(){try{let s={};for(let k of ['autoresponse_message','autoresponse_issue','autoresponse_order','process_issues','process_orders','debug_read_only','poll_interval_seconds']){let e=document.getElementById(k);s[k]=e.type==='checkbox'?e.checked:(k==='poll_interval_seconds'?+e.value:e.value)}await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(s)});alert('Saved. Debug data will appear after the next poll.');await load()}catch(e){alert('Could not save settings: '+e.message)}}
+    async function connect(){let x=await api('/api/allegro/device',{method:'POST'});oauth.innerHTML='Open <a target="_blank" href="'+x.verification_uri_complete+'">Allegro login</a> and approve it. Code: <b>'+x.user_code+'</b>'}
+    async function complete(){try{await api('/api/allegro/device/complete',{method:'POST'});await load();alert('Connected')}catch(e){alert(e.message+' — wait a moment and try again.')}}
+    load().catch(e=>status.textContent=e.message)
+  </script>
+</body>
+</html>

@@ -15,11 +15,6 @@ class Decision:
         self.reason = reason
 
 
-def is_working_time(now: datetime, settings: Settings) -> bool:
-    h = now.astimezone(settings.tz).hour
-    return settings.work_hours_start <= h < settings.work_hours_end
-
-
 def decide_autoreply(
     *,
     now: datetime,

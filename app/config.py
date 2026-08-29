@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from zoneinfo import ZoneInfo
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -10,64 +10,71 @@ load_dotenv()
 
 
 class Settings(BaseModel):
-    # Allegro API
-    client_id: str = Field(default_factory=lambda: os.getenv("ALLEGRO_CLIENT_ID", ""))
-    client_secret: str = Field(
-        default_factory=lambda: os.getenv("ALLEGRO_CLIENT_SECRET", "")
-    )
-    refresh_token: str = Field(
-        default_factory=lambda: os.getenv("ALLEGRO_REFRESH_TOKEN", "")
-    )
+    """Non-secret configuration; environment variables provide first-run defaults."""
 
     environment: str = Field(
         default_factory=lambda: os.getenv("ALLEGRO_ENV", "production")
     )
-
-    # Polling
     poll_interval_seconds: int = Field(
-        default_factory=lambda: int(os.getenv("POLL_INTERVAL", "60"))
+        default_factory=lambda: int(os.getenv("POLL_INTERVAL", "60")), ge=30, le=3600
     )
     max_threads_per_poll: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_THREADS", "5"))
+        default_factory=lambda: int(os.getenv("MAX_THREADS", "20")), ge=1, le=20
     )
     max_issues_per_poll: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_ISSUES", "5"))
+        default_factory=lambda: int(os.getenv("MAX_ISSUES", "20")), ge=1, le=100
     )
-
-    # Business rules
-    tz: ZoneInfo = Field(default=ZoneInfo(os.getenv("BUSINESS_TZ", "Europe/Warsaw")))
-    work_hours_start: int = Field(
-        default_factory=lambda: int(os.getenv("WORK_START_H", "9"))
-    )
-    work_hours_end: int = Field(
-        default_factory=lambda: int(os.getenv("WORK_END_H", "17"))
-    )
-
-    # Templates
     autoresponse_message: str = Field(
         default_factory=lambda: os.getenv(
             "TEMPLATE_FIRST_CONTACT",
-            "Dziękujemy za kontakt! Wkrótce wrócimy z odpowiedzią. \
-                Wiadomość automatyczna)",
-        )
+            "Dziękujemy za kontakt, odpowiemy najszybciej jak to będzie możliwe. \n\nZespół taanio_pl",
+        ),
+        min_length=1,
+        max_length=2000,
     )
     autoresponse_issue: str = Field(
         default_factory=lambda: os.getenv(
             "TEMPLATE_ISSUE",
-            "Dziękujemy za zgłoszenie problemu. Sprawdzimy sprawę i wkrótce się \
-                z Tobą skontaktujemy.",
-        )
+            "Dziękujemy za zgłoszenie problemu, odpowiemy najszybciej jak to będzie możliwe. \n\nZespół taanio_pl",
+        ),
+        min_length=1,
+        max_length=2000,
     )
+    autoresponse_order: str = Field(
+        default_factory=lambda: os.getenv(
+            "TEMPLATE_ORDER",
+            """Dziękujemy za Twoje zamówienie 💛
+Bardzo się cieszymy, że wybrałeś właśnie nas.
 
-    # Behavior switches
-    reply_outside_working_hours: bool = Field(
-        default_factory=lambda: os.getenv("REPLY_AFTER_HOURS", "true").lower() == "true"
-    )
-    reply_only_first_message: bool = Field(
-        default_factory=lambda: os.getenv("REPLY_ONLY_FIRST", "true").lower() == "true"
+Każdą paczkę przygotowujemy starannie i wysyłamy najpóźniej w ciągu 3 dni roboczych od zakupu.
+
+🧾 Jeśli podczas składania zamówienia została wybrana faktura, w większości przypadków w paczce znajdziesz paragon z NIP, który jest fakturą uproszczoną.
+
+Mamy nadzieję, że wszystko dotrze do Ciebie szybko i będzie dokładnie takie, jak oczekujesz 😊
+Jeśli po odebraniu przesyłki znajdziesz chwilę na wystawienie oceny na Allegro, będzie nam naprawdę bardzo miło — każda opinia ma dla nas duże znaczenie ⭐
+
+Dziękujemy za zaufanie i życzymy samych udanych zakupów 💛""",
+        ),
+        min_length=1,
+        max_length=2000,
     )
     process_issues: bool = Field(
         default_factory=lambda: os.getenv("PROCESS_ISSUES", "true").lower() == "true"
+    )
+    process_orders: bool = Field(
+        default_factory=lambda: os.getenv("PROCESS_ORDERS", "true").lower() == "true"
+    )
+    debug_read_only: bool = Field(
+        default_factory=lambda: os.getenv("DEBUG_READ_ONLY", "false").lower() == "true"
+    )
+
+
+def data_directory() -> Path:
+    configured = os.getenv("DATA_DIR")
+    return (
+        Path(configured)
+        if configured
+        else (Path("/data") if Path("/data").is_dir() else Path(".data"))
     )
 
 

@@ -4,11 +4,12 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .allegro import AllegroClient
@@ -24,6 +25,12 @@ client = AllegroClient(store, defaults)
 app = FastAPI(title="Allegro Autoresponder", docs_url=None, redoc_url=None)
 bearer = HTTPBearer(auto_error=False)
 poll_task: asyncio.Task[None] | None = None
+recent_fetches: dict[str, Any] = {
+    "fetched_at": None,
+    "messages": [],
+    "issues": [],
+    "purchases": [],
+}
 
 
 def settings() -> Settings:
@@ -54,11 +61,13 @@ async def admin(credentials: HTTPAuthorizationCredentials | None = Depends(beare
 
 async def process_threads(now: datetime, config: Settings) -> None:
     payload = await client.list_threads(config.max_threads_per_poll)
+    fetched_messages: list[dict[str, Any]] = []
     for thread in payload.get("threads", payload.get("items", [])) or []:
         thread_id = thread.get("id") or thread.get("thread", {}).get("id")
         if not thread_id:
             continue
         messages = (await client.list_messages(thread_id)).get("messages", [])
+        fetched_messages.append({"thread": thread, "messages": messages})
         if not messages:
             continue
         last = max(messages, key=lambda m: m.get("createdAt", ""))
@@ -73,24 +82,32 @@ async def process_threads(now: datetime, config: Settings) -> None:
         created = datetime.fromisoformat(last.get("createdAt", now.isoformat()).replace("Z", "+00:00"))
         decision = decide_autoreply(now=now, msg_time=created, settings=config)
         key = f"thread:{thread_id}:{message_id}"
-        if decision.should_reply and decision.message and store.claim_processed(key):
+        if (
+            not config.debug_read_only
+            and decision.should_reply
+            and decision.message
+            and store.claim_processed(key)
+        ):
             try:
                 await client.post_message(thread_id, decision.message)
                 logger.info("Replied to thread %s", thread_id)
             except Exception:
                 store.remove_processed(key)
                 raise
+    recent_fetches["messages"] = fetched_messages
 
 
 async def process_issues(now: datetime, config: Settings) -> None:
-    if not config.process_issues:
+    if not config.process_issues and not config.debug_read_only:
         return
     payload = await client.list_issues(config.max_issues_per_poll)
+    fetched_issues: list[dict[str, Any]] = []
     for issue in payload.get("issues", []) or []:
         issue_id = issue.get("id")
         if not issue_id:
             continue
         messages = (await client.list_issue_messages(issue_id)).get("chat", [])
+        fetched_issues.append({"issue": issue, "messages": messages})
         if not messages:
             continue
         # Allegro returns issue chat newest-first; choose explicitly to be resilient.
@@ -106,20 +123,31 @@ async def process_issues(now: datetime, config: Settings) -> None:
         created = datetime.fromisoformat(last.get("createdAt", now.isoformat()).replace("Z", "+00:00"))
         decision = decide_autoreply(now=now, msg_time=created, settings=config, is_issue=True)
         key = f"issue:{issue_id}:{message_id}"
-        if decision.should_reply and decision.message and store.claim_processed(key):
+        if (
+            not config.debug_read_only
+            and decision.should_reply
+            and decision.message
+            and store.claim_processed(key)
+        ):
             try:
                 await client.post_issue_message(issue_id, decision.message)
                 logger.info("Replied to issue %s", issue_id)
             except Exception:
                 store.remove_processed(key)
                 raise
+    recent_fetches["issues"] = fetched_issues
 
 
 async def process_orders(config: Settings) -> None:
     """Send one transaction-linked acknowledgement for each newly seen purchase."""
-    if not config.process_orders:
+    if not config.process_orders and not config.debug_read_only:
         return
     cursor = store.get("order_event_cursor")
+    if config.debug_read_only:
+        latest = (await client.latest_order_event()).get("latestEvent", {})
+        events = (await client.list_order_events(cursor)).get("events", []) if cursor else []
+        recent_fetches["purchases"] = [latest, *events] if latest else events
+        return
     if not cursor:
         # Begin watching from now. This avoids sending acknowledgements for historic orders
         # the first time the feature is enabled.
@@ -158,6 +186,7 @@ async def process_once() -> None:
     await process_orders(config)
     await process_threads(now, config)
     await process_issues(now, config)
+    recent_fetches["fetched_at"] = now.isoformat()
 
 
 async def poll_loop() -> None:
@@ -200,10 +229,20 @@ async def read_settings() -> dict[str, Any]:
 @app.put("/api/settings", dependencies=[Depends(admin)])
 async def save_settings(request: Request) -> dict[str, bool]:
     try:
-        store.save_settings(Settings.model_validate(await request.json()))
+        updated = settings().model_dump()
+        updated.update(await request.json())
+        store.save_settings(Settings.model_validate(updated))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return {"saved": True}
+
+
+@app.get("/api/debug/recent", dependencies=[Depends(admin)])
+async def recent_debug_data() -> dict[str, Any]:
+    """Return the current poll's in-memory data only while read-only debug is enabled."""
+    if not settings().debug_read_only:
+        raise HTTPException(status_code=404, detail="Read-only debug mode is disabled.")
+    return recent_fetches
 
 
 @app.post("/api/allegro/device", dependencies=[Depends(admin)])
@@ -249,9 +288,6 @@ async def complete_device_flow() -> dict[str, bool]:
     return {"connected": True}
 
 
-PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Allegro Autoresponder</title><style>body{max-width:720px;margin:40px auto;padding:0 16px;font:16px system-ui;color:#191919}textarea,input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 16px}textarea{min-height:105px}button{padding:10px 14px;background:#111;color:#fff;border:0;border-radius:5px}section{border-top:1px solid #ddd;margin-top:28px;padding-top:20px}.row{display:flex;gap:18px}.row>*{flex:1}</style></head><body><h1>Allegro Autoresponder</h1><p id="status">Loading…</p><section><h2>Connect Allegro</h2><p>Device flow works through an SSH tunnel and needs no public callback URL.</p><button onclick="connect()">Get Allegro login link</button> <button onclick="complete()">I approved it</button><p id="oauth"></p></section><section><h2>Replies</h2><label>Question reply<textarea id="autoresponse_message"></textarea></label><label>Issue/discussion reply<textarea id="autoresponse_issue"></textarea></label><label>New-order reply<textarea id="autoresponse_order"></textarea></label><label><input type="checkbox" id="process_issues"> Respond to issues/discussions</label><label><input type="checkbox" id="process_orders"> Send a message for each new purchase</label><label><input type="checkbox" id="reply_only_first_message"> Reply only once per customer message</label><div class="row"><label>Poll seconds<input id="poll_interval_seconds" type="number"></label></div><button onclick="save()">Save configuration</button></section><script>let headers={};let token=prompt('Admin token (leave empty if APP_ADMIN_TOKEN is not set)');if(token)headers.Authorization='Bearer '+token;async function api(u,o={}){o.headers={...headers,...(o.headers||{})};let r=await fetch(u,o);if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json()}async function load(){let s=await api('/api/settings');for(let k in s){let e=document.getElementById(k);if(e)e.type==='checkbox'?e.checked=s[k]:e.value=s[k]}let h=await fetch('/health').then(x=>x.json());status.textContent=h.connected?'Connected and polling.':'Not connected yet.'}async function save(){let s={};for(let k of ['autoresponse_message','autoresponse_issue','autoresponse_order','process_issues','process_orders','reply_only_first_message','poll_interval_seconds']){let e=document.getElementById(k);s[k]=e.type==='checkbox'?e.checked:(k==='poll_interval_seconds'?+e.value:e.value)}let old=await api('/api/settings');Object.assign(old,s);await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(old)});alert('Saved')}async function connect(){let x=await api('/api/allegro/device',{method:'POST'});oauth.innerHTML='Open <a target="_blank" href="'+x.verification_uri_complete+'">Allegro login</a> and approve it. Code: <b>'+x.user_code+'</b>'}async function complete(){try{await api('/api/allegro/device/complete',{method:'POST'});await load();alert('Connected')}catch(e){alert(e.message+' — wait a moment and try again.')}}load().catch(e=>status.textContent=e.message)</script></body></html>'''
-
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard() -> str:
-    return PAGE
+@app.get("/")
+async def dashboard() -> FileResponse:
+    return FileResponse(Path(__file__).with_name("templates") / "dashboard.html")

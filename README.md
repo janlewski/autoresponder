@@ -21,9 +21,12 @@ ALLEGRO_CLIENT_ID=...
 ALLEGRO_CLIENT_SECRET=...
 APP_ADMIN_TOKEN=a-long-random-secret
 DATA_DIR=/data
+DEBUG_READ_ONLY=false
 ```
 
 `APP_ADMIN_TOKEN` protects the settings and OAuth endpoints; it is deliberately not stored in the database. `DATA_DIR` must be a Railway Volume mount, for example `/data`. Without a volume, a deploy discards the configuration and eventually breaks authorization.
+
+Set `DEBUG_READ_ONLY=true` to enable read-only debug mode on first run. As with the other non-secret settings, once configuration has been saved through the dashboard, the persisted SQLite value takes precedence over this environment default.
 
 Open the dashboard and use **Connect Allegro**. It uses Allegro Device Flow, so it works through an SSH tunnel and requires no public redirect URL. Allegro gives an access token valid for 12 hours and rotates the refresh token on every refresh (with a short 60-second overlap). The app saves the replacement refresh token in SQLite before it makes another request; do not run two replicas against the same Allegro account/database.
 
@@ -44,6 +47,7 @@ Open `http://localhost:8000`. Local state is saved in `.data/autoresponder.sqlit
 ## Design notes
 
 - The polling worker re-reads saved settings between polls.
+- Enable **read-only debug mode** in the dashboard to inspect the messages, issues, and purchase events fetched during the current process. While enabled, it sends no acknowledgements and does not advance the order-event cursor.
 - Reply keys are durable, so restarts do not send the same acknowledgement twice. A failed send releases its key for retry.
 - Keep polling at one worker/replica. Multiple workers can race both outgoing replies and the single-use refresh-token rotation.
 - By default, messages older than ten minutes are ignored to avoid responding to historic conversations after first deployment.

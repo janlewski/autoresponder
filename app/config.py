@@ -22,6 +22,7 @@ class Settings(BaseModel):
     reply_only_first_message: bool = Field(default_factory=lambda: os.getenv("REPLY_ONLY_FIRST", "true").lower() == "true")
     process_issues: bool = Field(default_factory=lambda: os.getenv("PROCESS_ISSUES", "true").lower() == "true")
     process_orders: bool = Field(default_factory=lambda: os.getenv("PROCESS_ORDERS", "true").lower() == "true")
+    debug_read_only: bool = Field(default_factory=lambda: os.getenv("DEBUG_READ_ONLY", "false").lower() == "true")
 
 def data_directory() -> Path:
     configured = os.getenv("DATA_DIR")

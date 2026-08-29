@@ -1,183 +1,77 @@
 from __future__ import annotations
 
 import base64
-import logging
+import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import httpx
-from dotenv import set_key
 
 from .config import Settings
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = PROJECT_ROOT / ".env"
+from .store import Store
 
 
 class AllegroClient:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self._token: Optional[str] = None
-        self._token_expiry: datetime = datetime.now(timezone.utc)
+    def __init__(self, store: Store, defaults: Settings) -> None:
+        self.store, self.defaults = store, defaults
+        self._token = ""
+        self._token_expiry = datetime.now(timezone.utc)
 
-        if settings.environment.lower().startswith("sandbox"):
-            self.api_base = "https://api.allegro.pl.allegrosandbox.pl"
-            self.oauth_base = "https://allegro.pl.allegrosandbox.pl/auth/oauth"
-        else:
-            self.api_base = "https://api.allegro.pl"
-            self.oauth_base = "https://allegro.pl/auth/oauth"
+    @property
+    def settings(self) -> Settings:
+        return self.store.get_settings(self.defaults)
+
+    @property
+    def oauth_base(self) -> str:
+        return "https://allegro.pl.allegrosandbox.pl/auth/oauth" if self.settings.environment.startswith("sandbox") else "https://allegro.pl/auth/oauth"
+
+    @property
+    def api_base(self) -> str:
+        return "https://api.allegro.pl.allegrosandbox.pl" if self.settings.environment.startswith("sandbox") else "https://api.allegro.pl"
+
+    def basic_auth(self) -> str:
+        client_id, secret = os.getenv("ALLEGRO_CLIENT_ID", ""), os.getenv("ALLEGRO_CLIENT_SECRET", "")
+        if not client_id or not secret:
+            raise RuntimeError("Set ALLEGRO_CLIENT_ID and ALLEGRO_CLIENT_SECRET in Railway variables.")
+        return "Basic " + base64.b64encode(f"{client_id}:{secret}".encode()).decode()
 
     async def _ensure_token(self) -> str:
         if self._token and datetime.now(timezone.utc) < self._token_expiry:
             return self._token
+        # Accept the old environment-only setup on the first boot, then migrate it
+        # into the durable store with the first successful token rotation.
+        refresh_token = self.store.token("refresh_token") or os.getenv("ALLEGRO_REFRESH_TOKEN", "")
+        if not refresh_token:
+            raise RuntimeError("Allegro is not connected. Use the Connect Allegro section.")
+        async with httpx.AsyncClient(timeout=30) as http:
+            response = await http.post(f"{self.oauth_base}/token", headers={"Authorization": self.basic_auth()}, data={"grant_type": "refresh_token", "refresh_token": refresh_token})
+            response.raise_for_status()
+            payload = response.json()
+        # Refresh tokens rotate: persist replacement before any later API call.
+        self.store.save_token_response(payload)
+        self._token = str(payload["access_token"])
+        self._token_expiry = datetime.now(timezone.utc) + timedelta(seconds=max(30, int(payload.get("expires_in", 43200)) - 120))
+        return self._token
 
-        basic = base64.b64encode(
-            f"{self.settings.client_id}:{self.settings.client_secret}".encode()
-        ).decode()
-        headers = {
-            "Authorization": f"Basic {basic}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.settings.refresh_token,
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                f"{self.oauth_base}/token", headers=headers, data=data
-            )
-            r.raise_for_status()
-            payload = r.json()
-            self._token = payload["access_token"]
-            # Refresh a bit earlier than exact expiry
-            self._token_expiry = datetime.now(timezone.utc) + timedelta(
-                seconds=int(payload.get("expires_in", 3600)) - 120
-            )
+    async def _headers(self, beta: bool = False) -> dict[str, str]:
+        media_type = "application/vnd.allegro.beta.v1+json" if beta else "application/vnd.allegro.public.v1+json"
+        return {"Authorization": f"Bearer {await self._ensure_token()}", "Accept": media_type, "Content-Type": media_type}
 
-            # Update refresh token if present in response
-            new_refresh_token = payload.get("refresh_token")
-            if new_refresh_token and new_refresh_token != self.settings.refresh_token:
-                self.settings.refresh_token = new_refresh_token
-                # Persist to .env if possible
-                try:
-                    set_key(str(ENV_FILE), "ALLEGRO_REFRESH_TOKEN", new_refresh_token)
-                    logger.info("_ensure_token: Updated refresh token in .env file")
-                except Exception as e:
-                    logger.warning(
-                        f"_ensure_token: Failed to update refresh token in .env: {e}"
-                    )
+    async def request(self, method: str, path: str, *, beta: bool = False, params: dict[str, Any] | None = None, json: dict[str, Any] | None = None) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=30) as http:
+            response = await http.request(method, f"{self.api_base}{path}", headers=await self._headers(beta), params=params, json=json)
+            response.raise_for_status()
+            return response.json() if response.content else {}
 
-            assert self._token, "Failed to obtain access token"
-            logger.info("_ensure_token: Obtained new access token")
-            return self._token
-
-    async def _headers(self, use_beta: bool = False) -> Dict[str, str]:
-        token = await self._ensure_token()
-        content_type = (
-            "application/vnd.allegro.beta.v1+json"
-            if use_beta
-            else "application/vnd.allegro.public.v1+json"
-        )
-        return {
-            "Authorization": f"Bearer {token}",
-            "Accept": content_type,
-            "Content-Type": content_type,
-        }
-
-    async def list_threads(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
-        headers = await self._headers()
-        url = f"{self.api_base}/messaging/threads?limit={limit}&offset={offset}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            logger.info(
-                f"list_threads: Retrieved threads: {len(r.json().get('threads', []))}"
-            )
-            return r.json()
-
-    async def list_messages(
-        self,
-        thread_id: str,
-        after: Optional[str] = None,
-        limit: int = 20,
-        offset: int = 0,
-    ) -> Dict[str, Any]:
-        headers = await self._headers()
-        url = f"{self.api_base}/messaging/threads/{thread_id}/messages?\
-            limit={limit}&offset={offset}"
-        if after:
-            from urllib.parse import quote
-
-            url += f"&after={quote(after)}"  # encode safely
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            logger.info(
-                f"list_messages: Retrieved messages in {thread_id}: \
-                    {len(r.json().get('messages', []))}"
-            )
-            return r.json()
-
-    async def post_message(self, thread_id: str, text: str) -> Dict[str, Any]:
-        headers = await self._headers()
-        url = f"{self.api_base}/messaging/threads/{thread_id}/messages"
-        logger.info(f"post_message: Posting message to {thread_id}: {text}")
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(url, headers=headers, json={"text": text})
-            r.raise_for_status()
-            logger.info(f"post_message: Successfully posted message to {thread_id}")
-            return r.json()
-
-    async def list_issues(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
-        """List post-purchase issues/disputes."""
-        headers = await self._headers(use_beta=True)
-        url = f"{self.api_base}/sale/issues?limit={limit}&offset={offset}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            logger.info(
-                f"list_issues: Retrieved issues: {len(r.json().get('issues', []))}"
-            )
-            return r.json()
-
-    async def list_issue_messages(
-        self, issue_id: str, limit: int = 20, offset: int = 0
-    ) -> Dict[str, Any]:
-        """List messages for a specific issue."""
-        headers = await self._headers(use_beta=True)
-        url = (
-            f"{self.api_base}/sale/issues/{issue_id}/chat?limit={limit}&offset={offset}"
-        )
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            message_count = len(r.json().get("chat", []))
-            logger.info(
-                f"list_issue_messages: Retrieved messages for issue {issue_id}: "
-                f"{message_count}"
-            )
-            return r.json()
-
-    async def post_issue_message(self, issue_id: str, text: str) -> Dict[str, Any]:
-        """Post a message to an issue."""
-        headers = await self._headers(use_beta=True)
-        url = f"{self.api_base}/sale/issues/{issue_id}/message"
-        payload = {"text": text, "type": "REGULAR"}
-        logger.info(f"post_issue_message: Posting message to issue {issue_id}: {text}")
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            logger.info(
-                f"post_issue_message: Successfully posted message to issue {issue_id}"
-            )
-            return r.json()
+    async def list_threads(self, limit: int) -> dict[str, Any]:
+        return await self.request("GET", "/messaging/threads", params={"limit": limit, "offset": 0})
+    async def list_messages(self, thread_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"/messaging/threads/{thread_id}/messages", params={"limit": 20, "offset": 0})
+    async def post_message(self, thread_id: str, text: str) -> dict[str, Any]:
+        return await self.request("POST", f"/messaging/threads/{thread_id}/messages", json={"text": text})
+    async def list_issues(self, limit: int) -> dict[str, Any]:
+        return await self.request("GET", "/sale/issues", beta=True, params={"limit": limit, "offset": 0})
+    async def list_issue_messages(self, issue_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"/sale/issues/{issue_id}/chat", beta=True, params={"limit": 100, "offset": 0})
+    async def post_issue_message(self, issue_id: str, text: str) -> dict[str, Any]:
+        return await self.request("POST", f"/sale/issues/{issue_id}/message", beta=True, json={"text": text, "type": "REGULAR"})

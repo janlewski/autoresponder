@@ -15,11 +15,6 @@ class Decision:
         self.reason = reason
 
 
-def is_working_time(now: datetime, settings: Settings) -> bool:
-    h = now.astimezone(settings.tz).hour
-    return settings.work_hours_start <= h < settings.work_hours_end
-
-
 def decide_autoreply(
     *,
     now: datetime,
@@ -29,8 +24,6 @@ def decide_autoreply(
 ) -> Decision:
     if now - msg_time > timedelta(minutes=10):
         return Decision(False, reason="message too old")
-    if not settings.reply_outside_working_hours and not is_working_time(now, settings):
-        return Decision(False, reason="outside working hours")
     if is_issue:
         return Decision(True, settings.autoresponse_issue, reason="issue")
     else:

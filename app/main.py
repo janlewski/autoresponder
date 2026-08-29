@@ -115,9 +115,47 @@ async def process_issues(now: datetime, config: Settings) -> None:
                 raise
 
 
+async def process_orders(config: Settings) -> None:
+    """Send one transaction-linked acknowledgement for each newly seen purchase."""
+    if not config.process_orders:
+        return
+    cursor = store.get("order_event_cursor")
+    if not cursor:
+        # Begin watching from now. This avoids sending acknowledgements for historic orders
+        # the first time the feature is enabled.
+        latest = (await client.latest_order_event()).get("latestEvent", {})
+        if event_id := latest.get("id"):
+            store.set("order_event_cursor", str(event_id))
+        return
+    events = (await client.list_order_events(cursor)).get("events", []) or []
+    for event in events:
+        event_id = event.get("id")
+        if not event_id:
+            continue
+        # READY_FOR_PROCESSING means payment is completed (or the buyer chose COD/pickup)
+        # and Allegro considers the checkout form ready for fulfilment.
+        if event.get("type") == "READY_FOR_PROCESSING":
+            order = event.get("order", {})
+            order_id = order.get("checkoutForm", {}).get("id")
+            buyer_login = order.get("buyer", {}).get("login")
+            if not order_id or not buyer_login:
+                logger.warning("Skipping purchase event %s because buyer login or order ID is missing", event_id)
+            else:
+                key = f"order-message:{order_id}"
+                if store.claim_processed(key):
+                    try:
+                        await client.post_order_message(str(buyer_login), str(order_id), config.autoresponse_order)
+                        logger.info("Sent purchase acknowledgement for order %s", order_id)
+                    except Exception:
+                        store.remove_processed(key)
+                        raise
+        store.set("order_event_cursor", str(event_id))
+
+
 async def process_once() -> None:
     config = settings()
     now = datetime.now(timezone.utc)
+    await process_orders(config)
     await process_threads(now, config)
     await process_issues(now, config)
 
@@ -211,7 +249,7 @@ async def complete_device_flow() -> dict[str, bool]:
     return {"connected": True}
 
 
-PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Allegro Autoresponder</title><style>body{max-width:720px;margin:40px auto;padding:0 16px;font:16px system-ui;color:#191919}textarea,input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 16px}textarea{min-height:105px}button{padding:10px 14px;background:#111;color:#fff;border:0;border-radius:5px}section{border-top:1px solid #ddd;margin-top:28px;padding-top:20px}.row{display:flex;gap:18px}.row>*{flex:1}</style></head><body><h1>Allegro Autoresponder</h1><p id="status">Loading…</p><section><h2>Connect Allegro</h2><p>Device flow works through an SSH tunnel and needs no public callback URL.</p><button onclick="connect()">Get Allegro login link</button> <button onclick="complete()">I approved it</button><p id="oauth"></p></section><section><h2>Replies</h2><label>Question reply<textarea id="autoresponse_message"></textarea></label><label>Issue/discussion reply<textarea id="autoresponse_issue"></textarea></label><label><input type="checkbox" id="process_issues"> Respond to issues/discussions</label><label><input type="checkbox" id="reply_only_first_message"> Reply only once per customer message</label><label><input type="checkbox" id="reply_outside_working_hours"> Reply outside working hours</label><div class="row"><label>Poll seconds<input id="poll_interval_seconds" type="number"></label><label>Timezone<input id="timezone_name"></label></div><div class="row"><label>Work day starts<input id="work_hours_start" type="number" min="0" max="23"></label><label>Work day ends<input id="work_hours_end" type="number" min="1" max="24"></label></div><button onclick="save()">Save configuration</button></section><script>let headers={};let token=prompt('Admin token (leave empty if APP_ADMIN_TOKEN is not set)');if(token)headers.Authorization='Bearer '+token;async function api(u,o={}){o.headers={...headers,...(o.headers||{})};let r=await fetch(u,o);if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json()}async function load(){let s=await api('/api/settings');for(let k in s){let e=document.getElementById(k);if(e)e.type==='checkbox'?e.checked=s[k]:e.value=s[k]}let h=await fetch('/health').then(x=>x.json());status.textContent=h.connected?'Connected and polling.':'Not connected yet.'}async function save(){let s={};for(let k of ['autoresponse_message','autoresponse_issue','process_issues','reply_only_first_message','reply_outside_working_hours','poll_interval_seconds','timezone_name','work_hours_start','work_hours_end']){let e=document.getElementById(k);s[k]=e.type==='checkbox'?e.checked:(['poll_interval_seconds','work_hours_start','work_hours_end'].includes(k)?+e.value:e.value)}let old=await api('/api/settings');Object.assign(old,s);await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(old)});alert('Saved')}async function connect(){let x=await api('/api/allegro/device',{method:'POST'});oauth.innerHTML='Open <a target="_blank" href="'+x.verification_uri_complete+'">Allegro login</a> and approve it. Code: <b>'+x.user_code+'</b>'}async function complete(){try{await api('/api/allegro/device/complete',{method:'POST'});await load();alert('Connected')}catch(e){alert(e.message+' — wait a moment and try again.')}}load().catch(e=>status.textContent=e.message)</script></body></html>'''
+PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Allegro Autoresponder</title><style>body{max-width:720px;margin:40px auto;padding:0 16px;font:16px system-ui;color:#191919}textarea,input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 16px}textarea{min-height:105px}button{padding:10px 14px;background:#111;color:#fff;border:0;border-radius:5px}section{border-top:1px solid #ddd;margin-top:28px;padding-top:20px}.row{display:flex;gap:18px}.row>*{flex:1}</style></head><body><h1>Allegro Autoresponder</h1><p id="status">Loading…</p><section><h2>Connect Allegro</h2><p>Device flow works through an SSH tunnel and needs no public callback URL.</p><button onclick="connect()">Get Allegro login link</button> <button onclick="complete()">I approved it</button><p id="oauth"></p></section><section><h2>Replies</h2><label>Question reply<textarea id="autoresponse_message"></textarea></label><label>Issue/discussion reply<textarea id="autoresponse_issue"></textarea></label><label>New-order reply<textarea id="autoresponse_order"></textarea></label><label><input type="checkbox" id="process_issues"> Respond to issues/discussions</label><label><input type="checkbox" id="process_orders"> Send a message for each new purchase</label><label><input type="checkbox" id="reply_only_first_message"> Reply only once per customer message</label><label><input type="checkbox" id="reply_outside_working_hours"> Reply outside working hours</label><div class="row"><label>Poll seconds<input id="poll_interval_seconds" type="number"></label><label>Timezone<input id="timezone_name"></label></div><div class="row"><label>Work day starts<input id="work_hours_start" type="number" min="0" max="23"></label><label>Work day ends<input id="work_hours_end" type="number" min="1" max="24"></label></div><button onclick="save()">Save configuration</button></section><script>let headers={};let token=prompt('Admin token (leave empty if APP_ADMIN_TOKEN is not set)');if(token)headers.Authorization='Bearer '+token;async function api(u,o={}){o.headers={...headers,...(o.headers||{})};let r=await fetch(u,o);if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json()}async function load(){let s=await api('/api/settings');for(let k in s){let e=document.getElementById(k);if(e)e.type==='checkbox'?e.checked=s[k]:e.value=s[k]}let h=await fetch('/health').then(x=>x.json());status.textContent=h.connected?'Connected and polling.':'Not connected yet.'}async function save(){let s={};for(let k of ['autoresponse_message','autoresponse_issue','autoresponse_order','process_issues','process_orders','reply_only_first_message','reply_outside_working_hours','poll_interval_seconds','timezone_name','work_hours_start','work_hours_end']){let e=document.getElementById(k);s[k]=e.type==='checkbox'?e.checked:(['poll_interval_seconds','work_hours_start','work_hours_end'].includes(k)?+e.value:e.value)}let old=await api('/api/settings');Object.assign(old,s);await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(old)});alert('Saved')}async function connect(){let x=await api('/api/allegro/device',{method:'POST'});oauth.innerHTML='Open <a target="_blank" href="'+x.verification_uri_complete+'">Allegro login</a> and approve it. Code: <b>'+x.user_code+'</b>'}async function complete(){try{await api('/api/allegro/device/complete',{method:'POST'});await load();alert('Connected')}catch(e){alert(e.message+' — wait a moment and try again.')}}load().catch(e=>status.textContent=e.message)</script></body></html>'''
 
 
 @app.get("/", response_class=HTMLResponse)

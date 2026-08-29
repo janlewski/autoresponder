@@ -69,6 +69,21 @@ class AllegroClient:
         return await self.request("GET", f"/messaging/threads/{thread_id}/messages", params={"limit": 20, "offset": 0})
     async def post_message(self, thread_id: str, text: str) -> dict[str, Any]:
         return await self.request("POST", f"/messaging/threads/{thread_id}/messages", json={"text": text})
+    async def post_order_message(self, buyer_login: str, order_id: str, text: str) -> dict[str, Any]:
+        return await self.request(
+            "POST",
+            "/messaging/messages",
+            json={
+                "recipient": {"login": buyer_login},
+                "order": {"id": order_id},
+                "text": text,
+                "attachments": [],
+            },
+        )
+    async def list_order_events(self, from_event_id: str) -> dict[str, Any]:
+        return await self.request("GET", "/order/events", params={"from": from_event_id, "limit": 100})
+    async def latest_order_event(self) -> dict[str, Any]:
+        return await self.request("GET", "/order/event-stats")
     async def list_issues(self, limit: int) -> dict[str, Any]:
         return await self.request("GET", "/sale/issues", beta=True, params={"limit": limit, "offset": 0})
     async def list_issue_messages(self, issue_id: str) -> dict[str, Any]:

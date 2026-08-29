@@ -1,14 +1,16 @@
 # Allegro Autoresponder
 
-A small FastAPI service that replies once to new buyer questions in Allegro Messages and to a buyer's first message in an Allegro discussion/claim. Its dashboard edits the persisted reply templates and polling options.
+A small FastAPI service that replies to new buyer questions and buyer issue messages, and sends one transaction-linked acknowledgement for each newly detected purchase. Its dashboard edits the persisted templates and polling options.
 
 ## What Allegro supports
 
-- `GET /messaging/threads` and `POST /messaging/threads/{id}/messages` handle replies in **existing** buyer/seller threads. This API does not provide a general “send a new purchase thank-you message” endpoint, so a completed purchase alone cannot be turned into an automatic message.
-- `GET /order/events` is the reliable cursor-based way to detect new purchases. It is useful for a later order workflow (fulfilment, internal notifications, shipping), but not for creating a message to the buyer.
+- `GET /messaging/threads` and `POST /messaging/threads/{id}/messages` handle replies in **existing** buyer/seller threads.
+- `GET /order/events` detects newly paid/ready orders. For each `READY_FOR_PROCESSING` event, the service uses `POST /messaging/messages` to send an acknowledgement linked to that order and buyer. The first poll creates a cursor only, so historic orders do not receive a message.
 - `GET /sale/issues`, `GET /sale/issues/{id}/chat`, and `POST /sale/issues/{id}/message` support discussions and claims. The service only sends a `REGULAR` acknowledgement; it does not make legal/financial claim decisions.
 
 Read the official guides: [Messages](https://developer.allegro.pl/tutorials/jak-zarzadzac-centrum-wiadomosci-XxWm2K890Fk), [issues and claims](https://developer.allegro.pl/tutorials/jak-zarzadzac-dyskusjami-E7Zj6gK7ysE), and [orders/events](https://developer.allegro.pl/tutorials/jak-obslugiwac-zamowienia-GRaj0qyvwtR).
+
+The connected account needs `allegro:api:messaging` and `allegro:api:orders:read` scopes. The order acknowledgement is sent when Allegro reports `READY_FOR_PROCESSING`: payment is complete, or the buyer selected cash-on-delivery/pickup.
 
 ## Authentication
 
